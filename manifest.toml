@@ -8,7 +8,7 @@ name = "WireGuard pour qBittorrent"
 description.en = "Route qBittorrent traffic through a WireGuard VPN (NordVPN, Mullvad, AirVPN…)"
 description.fr = "Faire passer le trafic qBittorrent via un VPN WireGuard (NordVPN, Mullvad, AirVPN…)"
 
-version = "1.2~ynh1"
+version = "1.3~ynh1"
 
 maintainers = []
 

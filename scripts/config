@@ -101,38 +101,49 @@ for t in s.get('technologies',[]):
     ynh_print_info "Création des scripts de routage..."
 
     local scripts_dir="$install_dir"
+    local qbit_uid
+    qbit_uid=$(id -u qbittorrent 2>/dev/null)
+    [ -z "$qbit_uid" ] && ynh_die "Utilisateur qbittorrent introuvable. Installez d'abord l'app qBittorrent."
 
-    # postup.sh
+    # postup.sh : routing par UID + killswitch v4/v6 + autorisation tunnel WG
     cat > "${scripts_dir}/postup.sh" << POSTUP
 #!/bin/bash
 set +e
-ip rule add fwmark 0x1 table 100 2>/dev/null
-ip route replace default dev ${interface_name} table 100 2>/dev/null
-iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null
-iptables -t mangle -A OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null
+# Routing : tout le trafic du UID qbittorrent passe par la table 100
+ip rule del uidrange ${qbit_uid}-${qbit_uid} lookup 100 2>/dev/null
+ip rule add uidrange ${qbit_uid}-${qbit_uid} lookup 100 2>/dev/null
+ip route flush table 100 2>/dev/null
+ip route add default dev ${interface_name} src 10.5.0.2 table 100 2>/dev/null
 POSTUP
 
     if [ "$enable_killswitch" = "1" ]; then
         cat >> "${scripts_dir}/postup.sh" << POSTUP_KS
+# Killswitch IPv4 : autoriser lo + tunnel WG, rejeter le reste
+iptables -D OUTPUT -m owner --uid-owner qbittorrent -p udp -d ${server_ip} --dport 51820 -j ACCEPT 2>/dev/null
 iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null
-iptables -I OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null
 iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null
-iptables -I OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null
+iptables -I OUTPUT 1 -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null
+iptables -I OUTPUT 1 -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null
+iptables -I OUTPUT 1 -m owner --uid-owner qbittorrent -p udp -d ${server_ip} --dport 51820 -j ACCEPT 2>/dev/null
+# Killswitch IPv6 : NordVPN n'utilise que IPv4, on bloque toute fuite IPv6
+ip6tables -D OUTPUT -m owner --uid-owner qbittorrent -j REJECT 2>/dev/null
+ip6tables -I OUTPUT 1 -m owner --uid-owner qbittorrent -j REJECT 2>/dev/null
 POSTUP_KS
     fi
 
     echo "exit 0" >> "${scripts_dir}/postup.sh"
     chmod 750 "${scripts_dir}/postup.sh"
 
-    # postdown.sh
+    # postdown.sh : nettoyage symétrique
     cat > "${scripts_dir}/postdown.sh" << POSTDOWN
 #!/bin/bash
 set +e
-ip rule del fwmark 0x1 table 100 2>/dev/null
-ip route del default dev ${interface_name} table 100 2>/dev/null
-iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null
+ip rule del uidrange ${qbit_uid}-${qbit_uid} lookup 100 2>/dev/null
+ip route flush table 100 2>/dev/null
+iptables -D OUTPUT -m owner --uid-owner qbittorrent -p udp --dport 51820 -j ACCEPT 2>/dev/null
 iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null
 iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null
+ip6tables -D OUTPUT -m owner --uid-owner qbittorrent -j REJECT 2>/dev/null
 exit 0
 POSTDOWN
     chmod 750 "${scripts_dir}/postdown.sh"
@@ -192,12 +203,19 @@ _configure_qbittorrent() {
     local iface="$1"
     local qbit_conf
 
-    local qbit_home
-    qbit_home=$(getent passwd qbittorrent 2>/dev/null | cut -d: -f6)
-    qbit_conf="${qbit_home}/.config/qBittorrent/qBittorrent.conf"
-    [ ! -f "$qbit_conf" ] && qbit_conf="/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf"
+    # Chemins possibles selon les versions de l'app YunoHost qbittorrent
+    for candidate in \
+        "/home/yunohost.app/qbittorrent/qBittorrent/config/qBittorrent.conf" \
+        "/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf" \
+        "$(getent passwd qbittorrent 2>/dev/null | cut -d: -f6)/.config/qBittorrent/qBittorrent.conf"
+    do
+        if [ -f "$candidate" ]; then
+            qbit_conf="$candidate"
+            break
+        fi
+    done
 
-    if [ ! -f "$qbit_conf" ]; then
+    if [ -z "$qbit_conf" ]; then
         ynh_print_warn "qBittorrent.conf introuvable. Configurez manuellement : Outils → Options → Avancé → Interface réseau = $iface"
         return
     fi

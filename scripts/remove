@@ -13,18 +13,25 @@ systemctl disable "wg-quick@${interface_name}" --quiet 2>/dev/null || true
 rm -f "/etc/wireguard/${interface_name}.conf"
 
 # Nettoyage défensif au cas où PostDown n'aurait pas tourné
-iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null || true
+qbit_uid=$(id -u qbittorrent 2>/dev/null)
+[ -n "$qbit_uid" ] && ip rule del uidrange "${qbit_uid}-${qbit_uid}" lookup 100 2>/dev/null || true
+ip route flush table 100 2>/dev/null || true
 iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o "${interface_name}" -j REJECT 2>/dev/null || true
 iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null || true
-ip rule del fwmark 0x1 table 100 2>/dev/null || true
+iptables -D OUTPUT -m owner --uid-owner qbittorrent -p udp --dport 51820 -j ACCEPT 2>/dev/null || true
+ip6tables -D OUTPUT -m owner --uid-owner qbittorrent -j REJECT 2>/dev/null || true
 
 # Reset binding qBittorrent
-local qbit_home qbit_conf
-qbit_home=$(getent passwd qbittorrent 2>/dev/null | cut -d: -f6)
-qbit_conf="${qbit_home}/.config/qBittorrent/qBittorrent.conf"
-[ ! -f "$qbit_conf" ] && qbit_conf="/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf"
+qbit_conf=""
+for candidate in \
+    "/home/yunohost.app/qbittorrent/qBittorrent/config/qBittorrent.conf" \
+    "/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf" \
+    "$(getent passwd qbittorrent 2>/dev/null | cut -d: -f6)/.config/qBittorrent/qBittorrent.conf"
+do
+    [ -f "$candidate" ] && qbit_conf="$candidate" && break
+done
 
-if [ -f "$qbit_conf" ]; then
+if [ -n "$qbit_conf" ]; then
     systemctl stop qbittorrent 2>/dev/null || true
     sleep 1
     sed -i '/Session\\Interface=/d' "$qbit_conf"
