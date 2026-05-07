@@ -10,7 +10,6 @@ old_interface=$(ynh_app_setting_get --key=interface_name)
 #=================================================
 
 get__nordvpn_token() {
-    # Ne pas afficher le token stocké (sécurité)
     echo ""
 }
 
@@ -27,7 +26,6 @@ get__enable_killswitch() {
 #=================================================
 
 validate__nordvpn_token() {
-    # Si vide et qu'un token existe déjà, on garde l'existant
     if [ -z "$nordvpn_token" ]; then
         local existing
         existing=$(ynh_app_setting_get --key=nordvpn_token)
@@ -45,91 +43,101 @@ validate__nordvpn_token() {
 ynh_app_config_apply() {
     local interface_name="nordvpn"
 
-    # Utiliser le token existant si le champ est laissé vide
     if [ -z "$nordvpn_token" ]; then
         nordvpn_token=$(ynh_app_setting_get --key=nordvpn_token)
     fi
 
     ynh_script_progression "Connexion à l'API NordVPN..."
 
-    # --- Récupération de la clé privée WireGuard ---
+    # --- Clé privée WireGuard ---
     local private_key
     private_key=$(curl -sf "https://api.nordvpn.com/v1/users/services/credentials" \
         -u "token:$nordvpn_token" \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('nordlynx_private_key',''))" 2>/dev/null)
 
     if [ -z "$private_key" ]; then
-        ynh_die "Impossible de récupérer la clé WireGuard. Vérifiez votre Access Token NordVPN (account.nordvpn.com → Manual Setup → Access Token)."
+        ynh_die "Impossible de récupérer la clé WireGuard. Vérifiez votre Access Token NordVPN."
     fi
 
-    # --- Sélection du meilleur serveur ---
+    # --- Sélection du serveur ---
     ynh_script_progression "Sélection du meilleur serveur NordVPN..."
 
     local api_url="https://api.nordvpn.com/v1/servers/recommendations?filters[servers_technologies][identifier]=wireguard_udp&limit=1"
 
-    # Filtre optionnel par pays
     if [ -n "$country_code" ]; then
         local country_id
         country_id=$(curl -sf --globoff "https://api.nordvpn.com/v1/servers/countries" \
             | python3 -c "
 import sys,json
 code='${country_code^^}'
-countries=json.load(sys.stdin)
-for c in countries:
+for c in json.load(sys.stdin):
     if c.get('code','').upper() == code:
-        print(c['id'])
-        break
+        print(c['id']); break
 " 2>/dev/null)
-        if [ -n "$country_id" ]; then
-            api_url="${api_url}&filters[country_id]=${country_id}"
-        else
-            ynh_print_warn "Pays '$country_code' non trouvé, utilisation du meilleur serveur mondial."
-        fi
+        [ -n "$country_id" ] && api_url="${api_url}&filters[country_id]=${country_id}"
     fi
 
     local server_json server_ip server_pubkey server_name
     server_json=$(curl -sf --globoff "$api_url")
-
-    server_ip=$(echo "$server_json" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['station'])" 2>/dev/null)
+    server_ip=$(echo "$server_json"   | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['station'])" 2>/dev/null)
     server_name=$(echo "$server_json" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['name'])" 2>/dev/null)
     server_pubkey=$(echo "$server_json" | python3 -c "
 import sys,json
 s=json.load(sys.stdin)[0]
-for tech in s.get('technologies',[]):
-    if tech.get('identifier') == 'wireguard_udp':
-        for m in tech.get('metadata',[]):
+for t in s.get('technologies',[]):
+    if t.get('identifier') == 'wireguard_udp':
+        for m in t.get('metadata',[]):
             if m.get('name') == 'public_key':
                 print(m['value']); break
 " 2>/dev/null)
 
     if [ -z "$server_ip" ] || [ -z "$server_pubkey" ]; then
-        ynh_die "Impossible de récupérer les informations du serveur NordVPN. L'API est peut-être temporairement indisponible."
+        ynh_die "Impossible de récupérer les infos du serveur NordVPN."
     fi
 
-    ynh_script_progression "Serveur sélectionné : $server_name ($server_ip)"
+    ynh_script_progression "Serveur : $server_name ($server_ip)"
 
-    # --- Construction des règles de routage ---
-    local postup postdown
-    # Toutes les commandes "delete" ont || true car bash -c dans wg-quick hérite de set -e
-    postup="ip rule add fwmark 0x1 table 100 2>/dev/null || true"
-    postup="${postup}; ip route replace default dev ${interface_name} table 100 || true"
-    postup="${postup}; iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null || true"
-    postup="${postup}; iptables -t mangle -A OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1"
+    # --- Scripts de routage externes (évite les problèmes PostUp inline) ---
+    ynh_script_progression "Création des scripts de routage..."
 
-    postdown="ip rule del fwmark 0x1 table 100 2>/dev/null || true"
-    postdown="${postdown}; ip route del default dev ${interface_name} table 100 2>/dev/null || true"
-    postdown="${postdown}; iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null || true"
+    local scripts_dir="$install_dir"
+
+    # postup.sh
+    cat > "${scripts_dir}/postup.sh" << POSTUP
+#!/bin/bash
+set +e
+ip rule add fwmark 0x1 table 100 2>/dev/null
+ip route replace default dev ${interface_name} table 100 2>/dev/null
+iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null
+iptables -t mangle -A OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null
+POSTUP
 
     if [ "$enable_killswitch" = "1" ]; then
-        postup="${postup}; iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null || true"
-        postup="${postup}; iptables -I OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT"
-        postup="${postup}; iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null || true"
-        postup="${postup}; iptables -I OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT"
-        postdown="${postdown}; iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null || true"
-        postdown="${postdown}; iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null || true"
+        cat >> "${scripts_dir}/postup.sh" << POSTUP_KS
+iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null
+iptables -I OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null
+iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null
+iptables -I OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null
+POSTUP_KS
     fi
 
-    # --- Écriture du fichier WireGuard ---
+    echo "exit 0" >> "${scripts_dir}/postup.sh"
+    chmod 750 "${scripts_dir}/postup.sh"
+
+    # postdown.sh
+    cat > "${scripts_dir}/postdown.sh" << POSTDOWN
+#!/bin/bash
+set +e
+ip rule del fwmark 0x1 table 100 2>/dev/null
+ip route del default dev ${interface_name} table 100 2>/dev/null
+iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null
+iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null
+iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null
+exit 0
+POSTDOWN
+    chmod 750 "${scripts_dir}/postdown.sh"
+
+    # --- Config WireGuard (PostUp/Down appellent les scripts) ---
     ynh_script_progression "Écriture de la configuration WireGuard..."
 
     cat > "/etc/wireguard/${interface_name}.conf" << EOF
@@ -138,8 +146,8 @@ PrivateKey = ${private_key}
 Address = 10.5.0.2/32
 DNS = 103.86.96.100
 Table = off
-PostUp = ${postup}
-PostDown = ${postdown}
+PostUp = ${scripts_dir}/postup.sh
+PostDown = ${scripts_dir}/postdown.sh
 
 [Peer]
 PublicKey = ${server_pubkey}
@@ -149,31 +157,31 @@ PersistentKeepalive = 25
 EOF
     chmod 600 "/etc/wireguard/${interface_name}.conf"
 
-    # --- Démarrage de WireGuard ---
+    # --- Démarrage WireGuard ---
     ynh_script_progression "Démarrage du tunnel VPN vers $server_name..."
-    systemctl enable "wg-quick@${interface_name}" --quiet
-    systemctl restart "wg-quick@${interface_name}" || {
-        ynh_die "Échec du démarrage WireGuard. Logs : journalctl -u wg-quick@${interface_name} -n 20"
-    }
 
-    # Attendre que l'interface soit active
+    systemctl enable "wg-quick@${interface_name}" --quiet 2>/dev/null || true
+    systemctl restart "wg-quick@${interface_name}" 2>/dev/null \
+        || systemctl start "wg-quick@${interface_name}" \
+        || ynh_die "Échec WireGuard. Logs : journalctl -u wg-quick@${interface_name} -n 30"
+
     local i=0
     while ! ip link show "${interface_name}" &>/dev/null; do
         sleep 1; i=$((i+1))
-        [ $i -ge 10 ] && ynh_die "L'interface ${interface_name} n'est pas apparue après 10s."
+        [ $i -ge 10 ] && ynh_die "Interface ${interface_name} non disponible après 10s."
     done
 
     # --- Binding qBittorrent ---
     _configure_qbittorrent "${interface_name}"
 
-    # --- Sauvegarde des settings ---
-    ynh_app_setting_set --key=nordvpn_token --value="$nordvpn_token"
-    ynh_app_setting_set --key=country_code --value="$country_code"
+    # --- Sauvegarde settings ---
+    ynh_app_setting_set --key=nordvpn_token   --value="$nordvpn_token"
+    ynh_app_setting_set --key=country_code    --value="$country_code"
     ynh_app_setting_set --key=enable_killswitch --value="$enable_killswitch"
-    ynh_app_setting_set --key=interface_name --value="$interface_name"
+    ynh_app_setting_set --key=interface_name  --value="$interface_name"
     ynh_app_setting_set --key=connected_server --value="$server_name"
 
-    ynh_script_progression "VPN actif ! qBittorrent utilise maintenant $server_name."
+    ynh_script_progression "VPN actif sur $server_name. qBittorrent protégé."
 }
 
 #=================================================
@@ -184,15 +192,10 @@ _configure_qbittorrent() {
     local iface="$1"
     local qbit_conf
 
-    # Auto-détection du fichier de config qBittorrent
     local qbit_home
     qbit_home=$(getent passwd qbittorrent 2>/dev/null | cut -d: -f6)
     qbit_conf="${qbit_home}/.config/qBittorrent/qBittorrent.conf"
-
-    if [ ! -f "$qbit_conf" ]; then
-        # Fallback sur le chemin YunoHost classique
-        qbit_conf="/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf"
-    fi
+    [ ! -f "$qbit_conf" ] && qbit_conf="/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf"
 
     if [ ! -f "$qbit_conf" ]; then
         ynh_print_warn "qBittorrent.conf introuvable. Configurez manuellement : Outils → Options → Avancé → Interface réseau = $iface"
