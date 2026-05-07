@@ -110,17 +110,21 @@ for tech in s.get('technologies',[]):
 
     # --- Construction des règles de routage ---
     local postup postdown
+    # Toutes les commandes "delete" ont || true car bash -c dans wg-quick hérite de set -e
     postup="ip rule add fwmark 0x1 table 100 2>/dev/null || true"
-    postup="${postup}; ip route replace default dev ${interface_name} table 100"
-    postup="${postup}; iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null; iptables -t mangle -A OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1"
+    postup="${postup}; ip route replace default dev ${interface_name} table 100 || true"
+    postup="${postup}; iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null || true"
+    postup="${postup}; iptables -t mangle -A OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1"
 
     postdown="ip rule del fwmark 0x1 table 100 2>/dev/null || true"
     postdown="${postdown}; ip route del default dev ${interface_name} table 100 2>/dev/null || true"
     postdown="${postdown}; iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null || true"
 
     if [ "$enable_killswitch" = "1" ]; then
-        postup="${postup}; iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null; iptables -I OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT"
-        postup="${postup}; iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null; iptables -I OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT"
+        postup="${postup}; iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null || true"
+        postup="${postup}; iptables -I OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT"
+        postup="${postup}; iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null || true"
+        postup="${postup}; iptables -I OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT"
         postdown="${postdown}; iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null || true"
         postdown="${postdown}; iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o ${interface_name} -j REJECT 2>/dev/null || true"
     fi
