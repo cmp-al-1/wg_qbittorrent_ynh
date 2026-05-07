@@ -70,7 +70,7 @@ ynh_app_config_apply() {
     # Filtre optionnel par pays
     if [ -n "$country_code" ]; then
         local country_id
-        country_id=$(curl -sf "https://api.nordvpn.com/v1/servers/countries" \
+        country_id=$(curl -sf --globoff "https://api.nordvpn.com/v1/servers/countries" \
             | python3 -c "
 import sys,json
 code='${country_code^^}'
@@ -88,7 +88,7 @@ for c in countries:
     fi
 
     local server_json server_ip server_pubkey server_name
-    server_json=$(curl -sf "$api_url")
+    server_json=$(curl -sf --globoff "$api_url")
 
     server_ip=$(echo "$server_json" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['station'])" 2>/dev/null)
     server_name=$(echo "$server_json" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['name'])" 2>/dev/null)
