@@ -1,39 +1,34 @@
 # WireGuard pour qBittorrent — App YunoHost
 
-Route le trafic qBittorrent via un VPN WireGuard (NordVPN, Mullvad, AirVPN…) sans affecter le reste du serveur.
+Route **uniquement** le trafic qBittorrent via NordVPN (WireGuard/NordLynx).
+Le reste du serveur (Jellyfin, Radarr, Sonarr…) continue sur votre connexion normale.
 
-## Installation via YunoHost
+## Installation
 
-Dans l'interface admin YunoHost :
-1. Applications > Installer > Installer une app custom
-2. URL du dépôt : `https://github.com/<votre-username>/wg_qbittorrent_ynh`
-3. Après installation, aller dans les **Paramètres** de l'app et coller votre fichier `.conf` WireGuard
+1. Dans YunoHost : **Applications → Installer → URL custom**
+   - URL : `https://github.com/<username>/wg_qbittorrent_ynh`
+2. Après installation, ouvrir les **Paramètres** de l'app
+3. Coller votre **Access Token NordVPN**
+   - Disponible sur [account.nordvpn.com](https://account.nordvpn.com) → Manual Setup → Access Token
+4. Optionnel : saisir un code pays (FR, DE, US…) pour choisir la région
+5. Sauvegarder — l'app fait tout le reste automatiquement
 
-## Fichier NordVPN WireGuard
+## Ce que ça fait automatiquement
 
-1. [account.nordvpn.com](https://account.nordvpn.com) > Manual Setup > WireGuard
-2. Choisissez un pays/serveur > Download Config
-3. Copiez-collez le contenu dans les paramètres
+- Récupère vos clés WireGuard via l'API NordVPN
+- Sélectionne le serveur avec la charge la plus faible
+- Configure le tunnel WireGuard (interface `nordvpn`)
+- Route uniquement qBittorrent via le VPN (policy routing + fwmark)
+- Active le killswitch iptables (qBittorrent bloqué si VPN déconnecté)
+- Configure le binding d'interface dans qBittorrent.conf
+- Tout persiste au redémarrage via systemd (PostUp/PostDown)
 
-## Architecture
+## Schéma
 
 ```
-qBittorrent (user: qbittorrent)
-    │
-    ├── iptables fwmark 0x1
-    ├── ip rule: fwmark 0x1 → table 100
-    ├── ip route: table 100 default → wg interface
-    │
-    └── WireGuard (nordvpn / wg0)
-            │
-            └── Serveur NordVPN (endpoint:51820)
-                        │
-                        └── Internet (IP cachée)
+qBittorrent ──► iptables fwmark ──► WireGuard (nordvpn) ──► NordVPN ──► Internet
+                                                                           (IP cachée)
 
-Reste du serveur (Jellyfin, Radarr, Sonarr…) → Internet direct (IP normale)
+Jellyfin / Radarr / Sonarr ──────────────────────────────────────────► Internet
+                                                                        (IP normale)
 ```
-
-## Killswitch
-
-Quand activé : si le VPN se déconnecte, qBittorrent est bloqué via iptables.
-Les règles sont injectées dans `PostUp`/`PostDown` du fichier WireGuard → persistance automatique au redémarrage.
