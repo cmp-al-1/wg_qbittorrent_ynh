@@ -1,0 +1,11 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Mise à jour de $app..."
+
+# Rien à faire : toute la configuration est gérée par config_panel
+# WireGuard reste actif pendant la mise à jour
+
+ynh_script_progression "Mise à jour de $app terminée."

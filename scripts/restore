@@ -1,0 +1,33 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Restauration de la configuration WireGuard..."
+
+interface_name=$(ynh_app_setting_get --key=interface_name)
+qbit_conf_path=$(ynh_app_setting_get --key=qbit_conf_path)
+enable_killswitch=$(ynh_app_setting_get --key=enable_killswitch)
+
+# Restauration du fichier WireGuard
+ynh_restore "/etc/wireguard/$interface_name.conf"
+chmod 600 "/etc/wireguard/$interface_name.conf"
+
+# Redémarrage de WireGuard (PostUp re-appliquera les règles iptables)
+systemctl enable "wg-quick@$interface_name" --quiet
+systemctl start "wg-quick@$interface_name"
+
+# Restauration du binding qBittorrent
+if [ -f "$qbit_conf_path" ]; then
+    systemctl stop qbittorrent 2>/dev/null || true
+    sleep 1
+    if grep -q '^\[BitTorrent\]' "$qbit_conf_path"; then
+        if ! grep -q "Session\\\\Interface=$interface_name" "$qbit_conf_path"; then
+            sed -i "s|Session\\\\Interface=.*|Session\\\\Interface=$interface_name|" "$qbit_conf_path" 2>/dev/null || \
+            sed -i "/^\[BitTorrent\]/a Session\\\\Interface=$interface_name" "$qbit_conf_path"
+        fi
+    fi
+    systemctl start qbittorrent 2>/dev/null || true
+fi
+
+ynh_script_progression "Restauration de $app terminée."

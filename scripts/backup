@@ -1,0 +1,15 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Sauvegarde de la configuration WireGuard..."
+
+interface_name=$(ynh_app_setting_get --key=interface_name)
+
+# Sauvegarde du fichier de configuration WireGuard (contient la clé privée)
+if [ -f "/etc/wireguard/$interface_name.conf" ]; then
+    ynh_backup "/etc/wireguard/$interface_name.conf"
+fi
+
+ynh_script_progression "Sauvegarde terminée."

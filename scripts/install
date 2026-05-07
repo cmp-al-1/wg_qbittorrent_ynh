@@ -1,0 +1,15 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Initialisation de $app..."
+
+# Valeurs par défaut stockées dans les settings
+ynh_app_setting_set --key=interface_name --value="nordvpn"
+ynh_app_setting_set --key=enable_killswitch --value="1"
+ynh_app_setting_set --key=wg_config --value=""
+ynh_app_setting_set --key=qbit_conf_path --value="/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf"
+
+ynh_script_progression "Installation de $app terminée."
+ynh_script_progression "Rendez-vous dans Outils > Applications > $app > Paramètres pour configurer votre VPN."

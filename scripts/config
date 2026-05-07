@@ -1,0 +1,217 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+# Sauvegarde de l'ancienne interface avant modification
+old_interface=$(ynh_app_setting_get --key=interface_name)
+
+#=================================================
+# LECTURE DE L'ÉTAT ACTUEL (affiché dans le panel)
+#=================================================
+
+get__wg_config() {
+    local iface
+    iface=$(ynh_app_setting_get --key=interface_name)
+    if [ -f "/etc/wireguard/$iface.conf" ]; then
+        # Affiche le contenu original sans nos lignes injectées
+        grep -vE '^(Table|PostUp|PostDown)\s*=' "/etc/wireguard/$iface.conf" || true
+    fi
+}
+
+get__interface_name() {
+    ynh_app_setting_get --key=interface_name
+}
+
+get__enable_killswitch() {
+    ynh_app_setting_get --key=enable_killswitch
+}
+
+get__qbit_conf_path() {
+    ynh_app_setting_get --key=qbit_conf_path
+}
+
+#=================================================
+# VALIDATION
+#=================================================
+
+validate__wg_config() {
+    if [ -z "$wg_config" ]; then
+        echo "Le fichier de configuration WireGuard est obligatoire."
+        return 1
+    fi
+    if ! echo "$wg_config" | grep -q '^\[Interface\]'; then
+        echo "Configuration invalide : section [Interface] manquante."
+        return 1
+    fi
+    if ! echo "$wg_config" | grep -q '^PrivateKey'; then
+        echo "Configuration invalide : PrivateKey manquant."
+        return 1
+    fi
+    if ! echo "$wg_config" | grep -q '^\[Peer\]'; then
+        echo "Configuration invalide : section [Peer] manquante."
+        return 1
+    fi
+}
+
+validate__interface_name() {
+    if ! echo "$interface_name" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+        echo "Nom d'interface invalide : uniquement lettres, chiffres, underscores et tirets."
+        return 1
+    fi
+    if [ ${#interface_name} -gt 15 ]; then
+        echo "Nom d'interface trop long (max 15 caractères)."
+        return 1
+    fi
+}
+
+#=================================================
+# APPLICATION DE LA CONFIGURATION
+#=================================================
+
+ynh_app_config_apply() {
+    ynh_script_progression "Application de la configuration VPN..."
+
+    # --- Arrêt et nettoyage de l'ancienne interface si changement ---
+    if [ -n "$old_interface" ] && [ "$old_interface" != "$interface_name" ]; then
+        _teardown_vpn "$old_interface"
+    fi
+
+    # --- Construction des règles PostUp / PostDown ---
+    local postup postdown
+
+    postup="ip rule add fwmark 0x1 table 100 2>/dev/null || true"
+    postup="$postup; ip route replace default dev $interface_name table 100"
+    postup="$postup; iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null; iptables -t mangle -A OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1"
+
+    postdown="ip rule del fwmark 0x1 table 100 2>/dev/null || true"
+    postdown="$postdown; ip route del default dev $interface_name table 100 2>/dev/null || true"
+    postdown="$postdown; iptables -t mangle -D OUTPUT -m owner --uid-owner qbittorrent -j MARK --set-mark 0x1 2>/dev/null || true"
+
+    if [ "$enable_killswitch" = "1" ]; then
+        postup="$postup; iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null; iptables -I OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT"
+        postup="$postup; iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o $interface_name -j REJECT 2>/dev/null; iptables -I OUTPUT -m owner --uid-owner qbittorrent ! -o $interface_name -j REJECT"
+        postdown="$postdown; iptables -D OUTPUT -m owner --uid-owner qbittorrent -o lo -j ACCEPT 2>/dev/null || true"
+        postdown="$postdown; iptables -D OUTPUT -m owner --uid-owner qbittorrent ! -o $interface_name -j REJECT 2>/dev/null || true"
+    fi
+
+    # --- Génération du fichier WireGuard final ---
+    # Extrait les champs [Interface] sauf Table/PostUp/PostDown (on les remplace)
+    local interface_fields
+    interface_fields=$(echo "$wg_config" | awk '
+        /^\[Interface\]/ { in_if=1; next }
+        /^\[/ { in_if=0 }
+        in_if && /^[A-Za-z]/ && !/^Table[[:space:]]*=/ && !/^PostUp[[:space:]]*=/ && !/^PostDown[[:space:]]*=/ { print }
+    ')
+
+    # Extrait toutes les sections [Peer]
+    local peer_sections
+    peer_sections=$(echo "$wg_config" | awk '/^\[Peer\]/,0')
+
+    # Écrit le fichier final
+    {
+        echo "[Interface]"
+        echo "$interface_fields"
+        echo "Table = off"
+        echo "PostUp = $postup"
+        echo "PostDown = $postdown"
+        echo ""
+        echo "$peer_sections"
+    } > "/etc/wireguard/$interface_name.conf"
+    chmod 600 "/etc/wireguard/$interface_name.conf"
+
+    # --- Démarrage de WireGuard ---
+    ynh_script_progression "Démarrage de l'interface WireGuard $interface_name..."
+    systemctl enable "wg-quick@$interface_name" --quiet
+    systemctl restart "wg-quick@$interface_name" || {
+        ynh_die "Échec du démarrage de WireGuard. Vérifiez votre configuration (clés, endpoint)."
+    }
+
+    # Attendre que l'interface apparaisse
+    local i=0
+    while ! ip link show "$interface_name" &>/dev/null; do
+        sleep 1
+        i=$((i+1))
+        [ $i -ge 10 ] && ynh_die "L'interface $interface_name ne s'est pas créée. Vérifiez les logs : journalctl -u wg-quick@$interface_name"
+    done
+
+    ynh_script_progression "Interface $interface_name active."
+
+    # --- Configuration de qBittorrent ---
+    _configure_qbittorrent "$interface_name" "$qbit_conf_path"
+
+    # --- Sauvegarde des settings ---
+    ynh_app_setting_set --key=interface_name --value="$interface_name"
+    ynh_app_setting_set --key=enable_killswitch --value="$enable_killswitch"
+    ynh_app_setting_set --key=qbit_conf_path --value="$qbit_conf_path"
+    # On ne stocke pas wg_config pour éviter d'avoir la clé privée en double
+    # Elle est lisible depuis /etc/wireguard/$interface_name.conf (root only)
+
+    ynh_script_progression "Configuration VPN appliquée avec succès."
+}
+
+#=================================================
+# FONCTIONS UTILITAIRES
+#=================================================
+
+_configure_qbittorrent() {
+    local iface="$1"
+    local qbit_conf="$2"
+
+    if [ ! -f "$qbit_conf" ]; then
+        ynh_print_warn "Fichier qBittorrent.conf introuvable : $qbit_conf"
+        ynh_print_warn "Configurez manuellement l'interface réseau dans qBittorrent : Outils > Options > Avancé > Interface réseau = $iface"
+        return
+    fi
+
+    ynh_script_progression "Configuration du binding d'interface dans qBittorrent..."
+
+    # Arrêt propre de qBittorrent pour modifier le fichier de config
+    systemctl stop qbittorrent 2>/dev/null || true
+    sleep 1
+
+    if [ -n "$iface" ]; then
+        # Ajouter ou mettre à jour la section [BitTorrent]
+        if grep -q '^\[BitTorrent\]' "$qbit_conf"; then
+            # Mettre à jour Session\Interface
+            if grep -q 'Session\\Interface=' "$qbit_conf"; then
+                sed -i "s|Session\\\\Interface=.*|Session\\\\Interface=$iface|" "$qbit_conf"
+            else
+                sed -i "/^\[BitTorrent\]/a Session\\\\Interface=$iface" "$qbit_conf"
+            fi
+            # Mettre à jour Session\InterfaceName
+            if grep -q 'Session\\InterfaceName=' "$qbit_conf"; then
+                sed -i "s|Session\\\\InterfaceName=.*|Session\\\\InterfaceName=$iface|" "$qbit_conf"
+            else
+                sed -i "/^\[BitTorrent\]/a Session\\\\InterfaceName=$iface" "$qbit_conf"
+            fi
+        else
+            # Créer la section
+            printf '\n[BitTorrent]\nSession\\Interface=%s\nSession\\InterfaceName=%s\n' "$iface" "$iface" >> "$qbit_conf"
+        fi
+    else
+        # Supprimer le binding (désactivation)
+        sed -i '/Session\\Interface=/d' "$qbit_conf"
+        sed -i '/Session\\InterfaceName=/d' "$qbit_conf"
+    fi
+
+    # Redémarrage de qBittorrent
+    systemctl start qbittorrent 2>/dev/null || true
+    ynh_script_progression "qBittorrent redémarré sur l'interface $iface."
+}
+
+_teardown_vpn() {
+    local iface="$1"
+    [ -z "$iface" ] && return
+
+    ynh_script_progression "Nettoyage de l'ancienne interface $iface..."
+
+    # Arrêt de WireGuard (PostDown nettoie les règles iptables automatiquement)
+    systemctl stop "wg-quick@$iface" 2>/dev/null || true
+    systemctl disable "wg-quick@$iface" --quiet 2>/dev/null || true
+
+    # Suppression du fichier de config
+    rm -f "/etc/wireguard/$iface.conf"
+}
+
+ynh_app_config_run "$1"

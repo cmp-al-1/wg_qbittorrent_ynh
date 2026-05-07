@@ -1,0 +1,39 @@
+version = "1.0"
+
+[main]
+name = "Configuration VPN"
+
+[main.vpn]
+name = "Fichier de configuration WireGuard"
+
+[main.vpn.wg_config]
+ask = "Contenu de votre fichier .conf WireGuard"
+type = "text"
+help = "Copiez-collez le contenu de votre fichier .conf NordVPN. Téléchargeable sur : account.nordvpn.com > Manual Setup > WireGuard > Download Config. Les lignes Table/PostUp/PostDown seront remplacées automatiquement."
+example = "[Interface]\nPrivateKey = ...\nAddress = 10.5.0.2/32\nDNS = 103.86.96.100\n\n[Peer]\nPublicKey = ...\nEndpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0"
+
+[main.vpn.interface_name]
+ask = "Nom de l'interface réseau"
+type = "string"
+default = "nordvpn"
+help = "Nom de l'interface WireGuard qui sera créée (ex: nordvpn, wg0, mullvad). Uniquement lettres, chiffres, tirets."
+pattern.regexp = '^[a-zA-Z0-9_-]+$'
+pattern.error = "Uniquement lettres, chiffres, underscores et tirets"
+
+[main.killswitch]
+name = "Killswitch"
+
+[main.killswitch.enable_killswitch]
+ask = "Activer le killswitch"
+type = "boolean"
+default = true
+help = "Si activé : qBittorrent est bloqué si le VPN se déconnecte (recommandé). Désactivez seulement si vous avez des problèmes de connectivité."
+
+[main.qbittorrent]
+name = "Chemin qBittorrent"
+
+[main.qbittorrent.qbit_conf_path]
+ask = "Chemin du fichier qBittorrent.conf"
+type = "string"
+default = "/home/yunohost.app/qbittorrent/.config/qBittorrent/qBittorrent.conf"
+help = "Chemin complet vers le fichier de configuration qBittorrent. Modifiez uniquement si votre installation est non standard."
